@@ -4529,6 +4529,9 @@ mdb_env_open(MDB_env *env, const char *path, unsigned int flags, mdb_mode_t mode
 {
 	int		oflags, rc, len, excl = -1;
 	char *lpath, *dpath;
+#ifdef _WIN32
+	DWORD actual;
+#endif
 
 	if (env->me_fd!=INVALID_HANDLE_VALUE || (flags & ~(CHANGEABLE|CHANGELESS)))
 		return EINVAL;
@@ -4593,6 +4596,13 @@ mdb_env_open(MDB_env *env, const char *path, unsigned int flags, mdb_mode_t mode
 	mode = FILE_ATTRIBUTE_NORMAL;
 	env->me_fd = CreateFile(dpath, oflags, FILE_SHARE_READ|FILE_SHARE_WRITE,
 		NULL, len, mode, NULL);
+	if (!F_ISSET(flags, MDB_RDONLY)) {
+		if (!DeviceIoControl(env->me_fd, FSCTL_SET_SPARSE, NULL, 0,
+			NULL, 0, &actual, NULL)) {
+			rc = ErrCode();
+			goto leave;
+		}
+	}
 #else
 	if (F_ISSET(flags, MDB_RDONLY))
 		oflags = O_RDONLY;
@@ -4674,6 +4684,10 @@ static void ESECT
 mdb_env_close0(MDB_env *env, int excl)
 {
 	int i;
+#ifdef _WIN32
+	DWORD actual;
+	FILE_SET_SPARSE_BUFFER fssb;
+#endif
 
 	if (!(env->me_flags & MDB_ENV_ACTIVE))
 		return;
@@ -4711,8 +4725,15 @@ mdb_env_close0(MDB_env *env, int excl)
 	}
 	if (env->me_mfd != env->me_fd && env->me_mfd != INVALID_HANDLE_VALUE)
 		(void) close(env->me_mfd);
-	if (env->me_fd != INVALID_HANDLE_VALUE)
+	if (env->me_fd != INVALID_HANDLE_VALUE) {
+#ifdef _WIN32
+		SetEndOfFile(env->me_fd);
+		fssb.SetSparse = FALSE;
+		DeviceIoControl(env->me_fd, FSCTL_SET_SPARSE, &fssb,
+			sizeof(FILE_SET_SPARSE_BUFFER), NULL, 0, &actual, NULL);
+#endif
 		(void) close(env->me_fd);
+	}
 	if (env->me_txns) {
 		MDB_PID_T pid = env->me_pid;
 		/* Clearing readers is done in this function because
